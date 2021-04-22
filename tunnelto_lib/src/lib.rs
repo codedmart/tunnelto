@@ -65,15 +65,6 @@ pub struct ClientHello {
     pub reconnect_token: Option<ReconnectToken>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ClientHelloV1 {
-    pub id: ClientId,
-    pub sub_domain: Option<String>,
-    pub is_anonymous: bool,
-    unix_seconds: i64,
-    signature: String,
-}
-
 impl ClientHello {
     pub fn generate(sub_domain: Option<String>, typ: ClientType) -> Self {
         ClientHello {

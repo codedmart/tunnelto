@@ -1,9 +1,8 @@
 use crate::auth::reconnect_token::ReconnectTokenPayload;
-use crate::auth_db::AuthResult;
 use crate::{ReconnectToken, CONFIG};
 use futures::{SinkExt, StreamExt};
 use log::error;
-use tunnelto_lib::{ClientHello, ClientHelloV1, ClientId, ClientType, ServerHello};
+use tunnelto_lib::{ClientHello, ClientId, ClientType, ServerHello};
 use warp::filters::ws::{Message, WebSocket};
 
 pub struct ClientHandshake {
@@ -23,46 +22,7 @@ pub async fn auth_client_handshake(
         }
     };
 
-    if let Ok(client_hello_v1) =
-        serde_json::from_slice::<ClientHelloV1>(client_hello_data.as_bytes())
-    {
-        auth_client_v1(client_hello_v1, websocket).await
-    } else {
-        auth_client(client_hello_data.as_bytes(), websocket).await
-    }
-}
-
-async fn auth_client_v1(
-    client_hello: ClientHelloV1,
-    mut websocket: WebSocket,
-) -> Option<(WebSocket, ClientHandshake)> {
-    let client_id = client_hello.id.safe_id();
-    let sub_domain = match client_hello.sub_domain {
-        None => ServerHello::random_domain(),
-
-        // otherwise, try to assign the sub domain
-        Some(sub_domain) => {
-            let (ws, sub_domain) =
-                match sanitize_sub_domain_and_pre_validate(websocket, sub_domain, &client_id).await
-                {
-                    Some(s) => s,
-                    None => return None,
-                };
-            websocket = ws;
-
-            // don't allow specified domains for anonymous v1 clients
-            ServerHello::prefixed_random_domain(&sub_domain)
-        }
-    };
-
-    Some((
-        websocket,
-        ClientHandshake {
-            id: client_id,
-            sub_domain,
-            is_anonymous: true,
-        },
-    ))
+    auth_client(client_hello_data.as_bytes(), websocket).await
 }
 
 async fn auth_client(
@@ -80,89 +40,76 @@ async fn auth_client(
         }
     };
 
-    let (auth_key, client_id, requested_sub_domain) = match client_hello.client_type {
+    let (_auth_key, client_id, requested_sub_domain) = match client_hello.client_type {
         ClientType::Anonymous => {
-            // determine the client and subdomain
-            let (client_id, sub_domain) =
-                match (client_hello.reconnect_token, client_hello.sub_domain) {
-                    (Some(token), _) => {
-                        return handle_reconnect_token(token, websocket).await;
-                    }
-                    (None, Some(sd)) => (
-                        ClientId::generate(),
-                        ServerHello::prefixed_random_domain(&sd),
-                    ),
-                    (None, None) => (ClientId::generate(), ServerHello::random_domain()),
-                };
-
-            return Some((
-                websocket,
-                ClientHandshake {
-                    id: client_id,
-                    sub_domain,
-                    is_anonymous: true,
-                },
-            ));
+            error!("anonymous users not allowed");
+            return None;
         }
-        ClientType::Auth { key } => match client_hello.sub_domain {
-            Some(requested_sub_domain) => {
-                let client_id = key.client_id();
-                let (ws, sub_domain) = match sanitize_sub_domain_and_pre_validate(
-                    websocket,
-                    requested_sub_domain,
-                    &client_id,
-                )
-                .await
-                {
-                    Some(s) => s,
-                    None => return None,
-                };
-                websocket = ws;
-
-                (key, client_id, sub_domain)
-            }
-            None => {
-                return if let Some(token) = client_hello.reconnect_token {
-                    handle_reconnect_token(token, websocket).await
-                } else {
-                    let sub_domain = ServerHello::random_domain();
-                    Some((
+        ClientType::Auth { key } => {
+            // next authenticate the sub-domain
+            let _ = crate::AUTH_DB_SERVICE
+                .get_account_id_for_auth_key(&key.0)
+                .await;
+            match client_hello.sub_domain {
+                Some(requested_sub_domain) => {
+                    let client_id = key.client_id();
+                    let (ws, sub_domain) = match sanitize_sub_domain_and_pre_validate(
                         websocket,
-                        ClientHandshake {
-                            id: ClientId::generate(),
-                            sub_domain,
-                            is_anonymous: true,
-                        },
-                    ))
+                        requested_sub_domain,
+                        &client_id,
+                    )
+                    .await
+                    {
+                        Some(s) => s,
+                        None => return None,
+                    };
+                    websocket = ws;
+
+                    (key, client_id, sub_domain)
+                }
+                None => {
+                    return if let Some(token) = client_hello.reconnect_token {
+                        handle_reconnect_token(token, websocket).await
+                    } else {
+                        let sub_domain = ServerHello::random_domain();
+                        Some((
+                            websocket,
+                            ClientHandshake {
+                                id: ClientId::generate(),
+                                sub_domain,
+                                is_anonymous: true,
+                            },
+                        ))
+                    }
                 }
             }
-        },
+        }
     };
 
-    // next authenticate the sub-domain
-    let sub_domain = match crate::AUTH_DB_SERVICE
-        .auth_sub_domain(&auth_key.0, &requested_sub_domain)
-        .await
-    {
-        Ok(AuthResult::Available) | Ok(AuthResult::ReservedByYou) => requested_sub_domain,
-        Ok(AuthResult::ReservedByOther) => {
-            let data = serde_json::to_vec(&ServerHello::SubDomainInUse).unwrap_or_default();
-            let _ = websocket.send(Message::binary(data)).await;
-            return None;
-        }
-        Err(e) => {
-            error!("error auth-ing user {:?}!", e);
-            let data = serde_json::to_vec(&ServerHello::AuthFailed).unwrap_or_default();
-            let _ = websocket.send(Message::binary(data)).await;
-            return None;
-        }
-    };
+    // // next authenticate the sub-domain
+    // let sub_domain = match crate::AUTH_DB_SERVICE
+    //     .auth_sub_domain(&auth_key.0, &requested_sub_domain)
+    //     .await
+    // {
+    //     Ok(AuthResult::Available) | Ok(AuthResult::ReservedByYou) => requested_sub_domain,
+    //     Ok(AuthResult::ReservedByOther) => {
+    //         let data = serde_json::to_vec(&ServerHello::SubDomainInUse).unwrap_or_default();
+    //         let _ = websocket.send(Message::binary(data)).await;
+    //         return None;
+    //     }
+    //     Err(e) => {
+    //         error!("error auth-ing user {:?}!", e);
+    //         let data = serde_json::to_vec(&ServerHello::AuthFailed).unwrap_or_default();
+    //         let _ = websocket.send(Message::binary(data)).await;
+    //         return None;
+    //     }
+    // };
 
     Some((
         websocket,
         ClientHandshake {
             id: client_id,
-            sub_domain,
+            sub_domain: requested_sub_domain,
             is_anonymous: false,
         },
     ))
