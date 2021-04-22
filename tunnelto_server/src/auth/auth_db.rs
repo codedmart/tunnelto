@@ -30,12 +30,6 @@ impl AuthDbService {
     }
 }
 
-mod domain_db {
-    pub const TABLE_NAME: &'static str = "tunnelto_domains";
-    pub const PRIMARY_KEY: &'static str = "subdomain";
-    pub const ACCOUNT_ID: &'static str = "account_id";
-}
-
 mod key_db {
     pub const TABLE_NAME: &'static str = "tunnelto_auth";
     pub const PRIMARY_KEY: &'static str = "auth_key_hash";
@@ -68,32 +62,10 @@ pub enum AuthResult {
     Available,
 }
 impl AuthDbService {
-    pub async fn auth_sub_domain(
-        &self,
-        auth_key: &str,
-        subdomain: &str,
-    ) -> Result<AuthResult, Error> {
-        let auth_key_hash = key_id(auth_key);
-        println!(
-            "Starting: auth_key {:?} - auth_key_hash {:?} - subdomain {:?}",
-            auth_key, auth_key_hash, subdomain
-        );
-        let authenticated_account_id = self.get_account_id_for_auth_key(auth_key).await?;
-        println!("Progress: - account_id {:?}", authenticated_account_id);
-        match self.get_account_id_for_subdomain(subdomain).await? {
-            Some(account_id) => {
-                if authenticated_account_id == account_id {
-                    return Ok(AuthResult::ReservedByYou);
-                }
-
-                Ok(AuthResult::ReservedByOther)
-            }
-            None => Ok(AuthResult::Available),
-        }
-    }
-
     pub async fn get_account_id_for_auth_key(&self, auth_key: &str) -> Result<Uuid, Error> {
         let auth_key_hash = key_id(auth_key);
+
+        println!("Auth key hash is: {:?}", auth_key_hash);
 
         let mut input = GetItemInput {
             table_name: key_db::TABLE_NAME.to_string(),
@@ -123,39 +95,5 @@ impl AuthDbService {
 
         let uuid = Uuid::from_str(&account_str)?;
         Ok(uuid)
-    }
-
-    async fn get_account_id_for_subdomain(&self, subdomain: &str) -> Result<Option<Uuid>, Error> {
-        let mut input = GetItemInput {
-            table_name: domain_db::TABLE_NAME.to_string(),
-            ..Default::default()
-        };
-        input.key = {
-            let mut item = HashMap::new();
-            item.insert(
-                domain_db::PRIMARY_KEY.to_string(),
-                AttributeValue {
-                    s: Some(subdomain.to_string()),
-                    ..Default::default()
-                },
-            );
-            item
-        };
-
-        let result = self.client.get_item(input).await?;
-        let account_str = result
-            .item
-            .unwrap_or(HashMap::new())
-            .get(domain_db::ACCOUNT_ID)
-            .cloned()
-            .unwrap_or(AttributeValue::default())
-            .s;
-
-        if let Some(account_str) = account_str {
-            let uuid = Uuid::from_str(&account_str)?;
-            Ok(Some(uuid))
-        } else {
-            Ok(None)
-        }
     }
 }

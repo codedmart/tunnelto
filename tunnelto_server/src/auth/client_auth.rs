@@ -46,64 +46,51 @@ async fn auth_client(
             return None;
         }
         ClientType::Auth { key } => {
-            // next authenticate the sub-domain
-            let _ = crate::AUTH_DB_SERVICE
+            // Check auth
+            match crate::AUTH_DB_SERVICE
                 .get_account_id_for_auth_key(&key.0)
-                .await;
-            match client_hello.sub_domain {
-                Some(requested_sub_domain) => {
-                    let client_id = key.client_id();
-                    let (ws, sub_domain) = match sanitize_sub_domain_and_pre_validate(
-                        websocket,
-                        requested_sub_domain,
-                        &client_id,
-                    )
-                    .await
-                    {
-                        Some(s) => s,
-                        None => return None,
-                    };
-                    websocket = ws;
-
-                    (key, client_id, sub_domain)
+                .await
+            {
+                Err(_) => {
+                    error!("anonymous users not allowed");
+                    return None;
                 }
-                None => {
-                    return if let Some(token) = client_hello.reconnect_token {
-                        handle_reconnect_token(token, websocket).await
-                    } else {
-                        let sub_domain = ServerHello::random_domain();
-                        Some((
+                Ok(_) => match client_hello.sub_domain {
+                    Some(requested_sub_domain) => {
+                        let client_id = key.client_id();
+                        let (ws, sub_domain) = match sanitize_sub_domain_and_pre_validate(
                             websocket,
-                            ClientHandshake {
-                                id: ClientId::generate(),
-                                sub_domain,
-                                is_anonymous: true,
-                            },
-                        ))
+                            requested_sub_domain,
+                            &client_id,
+                        )
+                        .await
+                        {
+                            Some(s) => s,
+                            None => return None,
+                        };
+                        websocket = ws;
+
+                        (key, client_id, sub_domain)
                     }
-                }
+                    None => {
+                        return if let Some(token) = client_hello.reconnect_token {
+                            handle_reconnect_token(token, websocket).await
+                        } else {
+                            let sub_domain = ServerHello::random_domain();
+                            Some((
+                                websocket,
+                                ClientHandshake {
+                                    id: ClientId::generate(),
+                                    sub_domain,
+                                    is_anonymous: true,
+                                },
+                            ))
+                        }
+                    }
+                },
             }
         }
     };
-
-    // // next authenticate the sub-domain
-    // let sub_domain = match crate::AUTH_DB_SERVICE
-    //     .auth_sub_domain(&auth_key.0, &requested_sub_domain)
-    //     .await
-    // {
-    //     Ok(AuthResult::Available) | Ok(AuthResult::ReservedByYou) => requested_sub_domain,
-    //     Ok(AuthResult::ReservedByOther) => {
-    //         let data = serde_json::to_vec(&ServerHello::SubDomainInUse).unwrap_or_default();
-    //         let _ = websocket.send(Message::binary(data)).await;
-    //         return None;
-    //     }
-    //     Err(e) => {
-    //         error!("error auth-ing user {:?}!", e);
-    //         let data = serde_json::to_vec(&ServerHello::AuthFailed).unwrap_or_default();
-    //         let _ = websocket.send(Message::binary(data)).await;
-    //         return None;
-    //     }
-    // };
 
     Some((
         websocket,
